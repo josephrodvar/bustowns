@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>maag</title>
+<style>
+  :root {
+    --bg: #fafaf9; --fg: #1c1917; --muted: #78716c; --card: #ffffff; --line: #e7e5e4;
+    --green: #00843d; --bus: #ffc72c; --bike: #0a6dbd; --warn: #b45309;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0c0a09; --fg: #f5f5f4; --muted: #a8a29e; --card: #1c1917; --line: #292524; --warn: #f59e0b; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 16px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 480px; margin: 0 auto; padding: 20px 16px 40px; }
+  header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 16px; }
+  h1 { font-size: 22px; margin: 0; letter-spacing: -0.01em; }
+  #updated { color: var(--muted); font-size: 13px; }
+  section {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 14px 16px; margin-bottom: 12px; border-left: 6px solid var(--accent);
+  }
+  .label { font-size: 13px; color: var(--muted); margin-bottom: 4px; }
+  .times { font-size: 28px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .times .rest { font-size: 18px; font-weight: 500; color: var(--muted); }
+  .station { display: grid; grid-template-columns: 1fr repeat(3, 3.2em); gap: 4px; padding: 6px 0; border-top: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+  .station:first-of-type { border-top: 0; }
+  .station.head { color: var(--muted); font-size: 12px; border-top: 0; padding-bottom: 0; }
+  .station span:not(:first-child) { text-align: right; }
+  .warn { color: var(--warn); font-size: 12px; }
+  .err { color: var(--warn); font-size: 14px; }
+</style>
+</head>
+<body>
+<main>
+  <header><h1>maag</h1><span id="updated">loading…</span></header>
+  <section style="--accent: var(--green)">
+    <div class="label">🚋 Green Line eastbound · Brookline Village</div>
+    <div class="times" id="green">–</div>
+  </section>
+  <section style="--accent: var(--bus)">
+    <div class="label">🚌 66 northbound · Harvard St &amp; Aspinwall</div>
+    <div class="times" id="bus66">–</div>
+  </section>
+  <section style="--accent: var(--bike)">
+    <div class="label">🚲 Bluebikes</div>
+    <div id="bikes">–</div>
+  </section>
+</main>
+<script>
+// Same logic as data-science/analyses/runbooks/maag/maag.py.
+const MBTA_API = "https://api-v3.mbta.com";
+const GBFS_URL = "https://gbfs.bluebikes.com/gbfs/gbfs.json";
+const N_DEPARTURES = 3;
+const REFRESH_MS = 30000;
+
+// direction_id: Green-D 1 = East (toward Union Sq); 66 0 = Outbound (toward Harvard)
+const TRANSIT = [
+  { el: "green", stop: "place-bvmnl", route: "Green-D", direction_id: 1 },
+  { el: "bus66", stop: "1369", route: "66", direction_id: 0 },
+];
+const HOME_STATION_NAMES = ["99 Harvard St", "Brookline Town Hall", "Brookline Village MBTA at Pearl Street"];
+
+const getJSON = async (url) => {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`${r.status} ${url}`);
+  return r.json();
+};
+
+async function nextDepartures({ stop, route, direction_id }, now) {
+  const params = new URLSearchParams({
+    "filter[stop]": stop, "filter[route]": route,
+    "filter[direction_id]": direction_id, sort: "departure_time",
+  });
+  const { data } = await getJSON(`${MBTA_API}/predictions?${params}`);
+  return data
+    .map((p) => p.attributes.departure_time)
+    .filter(Boolean) // null for last stop / skipped
+    .map((t) => Math.floor((new Date(t) - now) / 60000))
+    .filter((m) => m >= 0)
+    .slice(0, N_DEPARTURES);
+}
+
+async function bikeAvailability() {
+  const feeds = Object.fromEntries((await getJSON(GBFS_URL)).data.en.feeds.map((f) => [f.name, f.url]));
+  const [info, status] = await Promise.all([
+    getJSON(feeds.station_information), getJSON(feeds.station_status),
+  ]);
+  const byId = Object.fromEntries(status.data.stations.map((s) => [s.station_id, s]));
+  return info.data.stations
+    .filter((s) => HOME_STATION_NAMES.includes(s.name))
+    .sort((a, b) => HOME_STATION_NAMES.indexOf(a.name) - HOME_STATION_NAMES.indexOf(b.name))
+    .map((s) => {
+      const st = byId[s.station_id];
+      const ebikes = st.num_ebikes_available ?? 0;
+      return {
+        name: s.name,
+        classic: st.num_bikes_available - ebikes, // num_bikes_available includes e-bikes
+        ebikes, docks: st.num_docks_available, renting: !!st.is_renting,
+      };
+    });
+}
+
+const fmt = (m) => (m === 0 ? "now" : `${m} min`);
+const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+function renderTimes(el, minutes) {
+  const node = document.getElementById(el);
+  if (!minutes.length) { node.innerHTML = `<span class="rest">no predictions</span>`; return; }
+  const [first, ...rest] = minutes.map(fmt);
+  node.innerHTML = `${first}${rest.length ? ` <span class="rest">· ${rest.join(" · ")}</span>` : ""}`;
+}
+
+function renderBikes(rows) {
+  document.getElementById("bikes").innerHTML =
+    `<div class="station head"><span></span><span>classic</span><span>e-bike</span><span>docks</span></div>` +
+    rows.map((b) => `<div class="station"><span>${esc(b.name)}${b.renting ? "" : ` <span class="warn">not renting</span>`}</span>` +
+      `<span>${b.classic}</span><span>${b.ebikes}</span><span>${b.docks}</span></div>`).join("");
+}
+
+async function refresh() {
+  const now = new Date();
+  const jobs = [
+    ...TRANSIT.map((t) => nextDepartures(t, now).then((m) => renderTimes(t.el, m))),
+    bikeAvailability().then(renderBikes),
+  ];
+  const results = await Promise.allSettled(jobs);
+  const failed = results.filter((r) => r.status === "rejected").length;
+  document.getElementById("updated").innerHTML =
+    now.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) +
+    (failed ? ` <span class="err">· ${failed} source(s) failed</span>` : "");
+}
+
+refresh();
+setInterval(refresh, REFRESH_MS);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
+</script>
+</body>
+</html>

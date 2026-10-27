@@ -17,3 +17,7 @@ python3 -m http.server
 ```
 
 As the project grows, update this file with build commands, test commands, and architecture notes.
+
+## Subpages
+
+- `maag/` — "mobility at a glance": a self-contained static page (bustowns.com/maag) showing live next Green Line / 66 departures and Bluebikes availability near home, fetched client-side from the MBTA V3 API and Bluebikes GBFS. Mirrors `analyses/runbooks/maag/maag.py` in the data-science repo.
